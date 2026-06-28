@@ -1,0 +1,207 @@
+# Copy this file to `.github/workflows/09-final-assessment-cd.yml`
+# when you start EX-12.
+#
+# This starter is intentionally incomplete.
+# It is meant to guide your thinking, not to run successfully as-is.
+#
+# Assessment target for this workflow:
+# - run after trusted code reaches `main`
+# - build one exact release image
+# - push it to the registry
+# - deploy it to the remote Linux host over SSH
+# - validate what is running
+#
+# Keep the course story visible:
+# package -> deliver
+name: 09 Final Assessment CD
+
+# TODO:
+# Add the trigger block yourself.
+# This workflow should run only after trusted code reaches `main`.
+# Keep the trigger easy to explain to another student.
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - closed
+
+env:
+  IMAGE_NAME: tiny-health-app
+  APP_PORT: "8000"
+  # Keep one exact image name for the whole assessment.
+  # The tag will change per run, but the image name should stay stable.
+
+jobs:
+  build-and-push:
+    if: github.event.pull_request.merged == true
+    name: Build and push release image
+    runs-on: ubuntu-latest
+    #
+    # Build order for this job:
+    # 1. confirm required secrets exist
+    # 2. check out the code
+    # 3. create one traceable image tag
+    # 4. create the full image reference
+    # 5. prepare Buildx
+    # 6. log in to the registry
+    # 7. show the image reference in logs
+    # 8. build and push the release image
+
+    outputs:
+      image_tag: "${{ steps.image-tag.outputs.image_tag }}"
+      image_ref: "${{ steps.image-ref.outputs.image_ref }}"
+    #
+    # Why outputs exist here:
+    # - the deploy job must use the exact same image values created in this build job
+    # - `GITHUB_OUTPUT` writes step outputs
+    # - job outputs expose those values to the next job
+    # - `needs.build-and-push.outputs...` reads them in deploy
+    #
+    # Keep this pattern simple.
+    # Do not add extra output variables unless they directly help the story.
+
+    steps:
+
+      - name: Check required GitHub secrets
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          missing=0
+          for secret in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_REGION ECR_REGISTRY ECR_REPOSITORY DEPLOY_HOST DEPLOY_USER DEPLOY_SSH_KEY; do
+            if [ -z "${!secret}" ]; then
+              echo "Missing secret: $secret"
+              missing=1
+            else
+              echo "$secret is set"
+            fi
+          done
+          if [ "$missing" -eq 1 ]; then
+            exit 1
+          fi
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Create image tag
+        id: image-tag
+        run: |
+          TAG="$(date -u +'%Y%m%d%H%M%S')-${{ github.run_id }}"
+          echo "image_tag=$TAG" >> $GITHUB_OUTPUT
+
+
+      - name: Create full image reference
+        id: image-ref
+        run: |
+          IMAGE_REF="${{ secrets.ECR_REGISTRY }}/${{ secrets.ECR_REPOSITORY }}:${{ steps.image-tag.outputs.image_tag }}"
+          echo "image_ref=$IMAGE_REF" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Show image reference
+        run: |
+          echo "Image reference: ${{ steps.image-ref.outputs.image_ref }}"
+
+      - name: Build and push release image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.image-ref.outputs.image_ref }}
+
+  deploy-to-host:
+    name: Deploy to remote host
+    needs:
+      - build-and-push
+    runs-on: ubuntu-latest
+    #
+    # Build order for this job:
+    # 1. connect to the remote host over SSH
+    # 2. confirm Docker is ready there
+    # 3. log in to the registry on the remote host
+    # 4. pull the exact image
+    # 5. replace the running container safely
+    # 6. wait for health locally on the host
+    # 7. check version and status on the host
+    # 8. validate the deployed app from the GitHub runner
+    #
+    # Keep this job straightforward.
+    # Do not add `always()` or extra cleanup logic unless your instructor asks for it.
+
+    steps:
+      - name: Deploy image over SSH
+        uses: appleboy/ssh-action@v1
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+          IMAGE_REF: ${{ needs.build-and-push.outputs.image_ref }}
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+          COMMIT_SHA: ${{ github.sha }}
+          APP_PORT: ${{ env.APP_PORT }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          envs: AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_REGION,ECR_REGISTRY,ECR_REPOSITORY,IMAGE_REF,IMAGE_TAG,COMMIT_SHA,APP_PORT
+          script: |
+            docker --version
+
+            aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+            aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+            aws configure set region $AWS_REGION
+            aws ecr get-login-password --region $AWS_REGION | \
+              docker login --username AWS --password-stdin $ECR_REGISTRY
+
+            docker pull $IMAGE_REF
+
+            docker rm -f app || true
+
+            docker run -d \
+              --name app \
+              -p ${APP_PORT}:8000 \
+              -e APP_ENV=production \
+              -e APP_VERSION=$IMAGE_TAG \
+              -e COMMIT_SHA=$COMMIT_SHA \
+              -e DEPLOYED_AT="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+              -e IMAGE_TAG=$IMAGE_TAG \
+              -e DEPLOY_MODE=ssh \
+              $IMAGE_REF
+
+            for attempt in 1 2 3 4 5; do
+              if curl --fail --silent http://127.0.0.1:${APP_PORT}/health; then
+                break
+              fi
+              echo "Waiting for app..."
+              sleep 3
+            done
+
+            curl --fail --silent http://127.0.0.1:${APP_PORT}/version
+            curl --fail --silent http://127.0.0.1:${APP_PORT}/status
+  
+
+      - name: Validate deployed app from GitHub Actions
+        run: |
+          curl --fail --silent http://${{ secrets.DEPLOY_HOST }}:${{ env.APP_PORT }}/health
+          curl --fail --silent http://${{ secrets.DEPLOY_HOST }}:${{ env.APP_PORT }}/version
+          curl --fail --silent http://${{ secrets.DEPLOY_HOST }}:${{ env.APP_PORT }}/status
