@@ -132,6 +132,7 @@ jobs:
     needs:
       - build-and-push
     runs-on: ubuntu-latest
+
     #
     # Build order for this job:
     # 1. connect to the remote host over SSH
@@ -147,6 +148,11 @@ jobs:
     # Do not add `always()` or extra cleanup logic unless your instructor asks for it.
 
     steps:
+
+      - name: Debug outputs from build job
+        run: |
+          echo "image_tag: [${{ needs.build-and-push.outputs.image_tag }}]"
+          echo "image_ref: [${{ needs.build-and-push.outputs.image_ref }}]"
       - name: Deploy image over SSH
         uses: appleboy/ssh-action@v1
         env:
